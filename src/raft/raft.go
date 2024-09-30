@@ -24,11 +24,18 @@ import (
 	"sync/atomic"
 	"time"
 
-	//	"course/labgob"
 	"course/labrpc"
 )
 
-// as each Raft peer becomes aware that successive log entries are
+type Role string
+
+const (
+	Follower  Role = "FOLLOWER"
+	Candidate Role = "CANDIDATE"
+	Leader    Role = "LEADER"
+)
+
+// ApplyMsg as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
@@ -49,7 +56,7 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-// A Go object implementing a single Raft peer.
+// Raft A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
@@ -60,10 +67,54 @@ type Raft struct {
 	// Your data here (PartA, PartB, PartC).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
+	role            Role
+	currentTerm     int
+	votedFor        int       //-1 represents no vote
+	electionStart   time.Time //选举时钟起点
+	electionTimeout time.Duration
 }
 
-// return currentTerm and whether this server
+func (rf *Raft) BecomeFollowerWithLock(term int) {
+	if term < rf.currentTerm {
+		//do nothing
+		LOG(rf.me, rf.currentTerm, DError, "due to lower term T%d, cannot become follower", term)
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	LOG(rf.me, rf.currentTerm, DInfo, "become follower in term T%d", term)
+	rf.role = Follower
+	if term > rf.currentTerm {
+		rf.votedFor = -1
+	}
+	rf.currentTerm = term
+}
+
+func (rf *Raft) BecomeLeaderWithLock(term int) {
+	if rf.role != Candidate {
+		LOG(rf.me, rf.currentTerm, DError, "cannot become leader in term T%d, because %s is not candidate", term, rf.me)
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.role = Leader
+	rf.currentTerm = term
+}
+
+func (rf *Raft) BecomeCandidateWithLock(term int) {
+	if rf.role == Leader {
+		LOG(rf.me, rf.currentTerm, DError, "cannot become candidate in term T%d, because %s already is leader", term, rf.me)
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	LOG(rf.me, rf.currentTerm, DInfo, "become candidate in term T%d", term)
+	rf.currentTerm++
+	rf.votedFor = rf.me
+	rf.electionStart = time.Now()
+}
+
+// GetState return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
@@ -223,7 +274,7 @@ func (rf *Raft) ticker() {
 	}
 }
 
-// the service or tester wants to create a Raft server. the ports
+// Make the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
 // have the same order. persister is a place for this server to
@@ -239,6 +290,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
+	rf.role = Follower
+	rf.currentTerm = 0
+	rf.votedFor = -1
 	// Your initialization code here (PartA, PartB, PartC).
 
 	// initialize from state persisted before a crash
