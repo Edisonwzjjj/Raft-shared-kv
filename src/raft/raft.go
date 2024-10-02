@@ -27,6 +27,47 @@ import (
 	"course/labrpc"
 )
 
+const (
+	electionTimeoutMin = 250 * time.Millisecond
+	electionTimeoutMax = 400 * time.Millisecond
+)
+
+func (rf *Raft) resetElectionTimerWithLock() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.electionStart = time.Now()
+	timeRange := int64(electionTimeoutMax - electionTimeoutMin)
+	rf.electionTimeout = electionTimeoutMin + time.Duration(rand.Int63()%timeRange)
+}
+
+func (rf *Raft) isTimedOut() bool {
+	return time.Since(rf.electionStart) > rf.electionTimeout
+}
+
+func (rf *Raft) startElection() {
+	votes := 0
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			votes++
+			continue
+		}
+		args := &RequestVoteArgs{
+			rf.currentTerm,
+			rf.me,
+		}
+		go func(peer int, args *RequestVoteArgs) {
+			reply := &RequestVoteReply{}
+			ok := rf.sendRequestVote(peer, args, reply)
+
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+		}(i, args)
+	}
+}
+
 type Role string
 
 const (
@@ -175,12 +216,16 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (PartA, PartB).
+	Term        int
+	CandidateId int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (PartA).
+	Term        int
+	VoteGranted bool
 }
 
 // example RequestVote RPC handler.
@@ -261,14 +306,15 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) ticker() {
+func (rf *Raft) electionTicker() {
 	for rf.killed() == false {
 
-		// Your code here (PartA)
-		// Check if a leader election should be started.
-
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
+		rf.mu.Lock()
+		if rf.role != Leader && rf.isTimedOut() {
+			rf.BecomeCandidateWithLock()
+			go rf.startElection()
+		}
+		rf.mu.Unlock()
 		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
@@ -299,7 +345,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	go rf.ticker()
+	go rf.electionTicker()
 
 	return rf
 }
